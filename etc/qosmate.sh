@@ -83,7 +83,7 @@ get_tc_overhead_params() {
     # Detect ATM-based presets
     case "$preset" in
         *atm*|*adsl*|*pppoa*|*pppoe*|*bridged*|*ipoa*|conservative)
-            printf '%s' "stab mtu 2047 tsize 512 mpu 68 overhead ${overhead:-44} linklayer atm"
+            printf '%s' "stab mtu 2048 tsize 128 mpu 56 overhead ${overhead:-44} linklayer atm"
             ;;
         docsis)
             printf '%s' "stab overhead ${overhead:-25} linklayer ethernet"
@@ -1118,8 +1118,8 @@ ${SETS}
         ip6 dscp < cs4 ip6 dscp != cs1 ip6 dscp set cs0 counter
     }
     chain mark_10s {
-        ip dscp < cs4 ip dscp set cs1 counter return
-        ip6 dscp < cs4 ip6 dscp set cs1 counter
+        ip dscp < cs4 ip dscp set cs2 counter return
+        ip6 dscp < cs4 ip6 dscp set cs2 counter
     }
 
     chain mark_cs0 {
@@ -1213,6 +1213,15 @@ tc qdisc add dev "$WAN" handle ffff: ingress
 # Create IFB interface
 ip link add name "ifb-$WAN" type ifb
 ip link set "ifb-$WAN" up
+
+#disable nic offloading as it damages MSS
+DEVS=$(ip link | grep UP | awk '{print $2}' | grep -v lo | tr -d : | awk -F @ '{print $1}')
+for DEV in $DEVS; do
+TOE_OPTIONS="rx tx sg tso ufo gso gro lro"
+  for TOE_OPTION in $TOE_OPTIONS; do
+    /usr/sbin/ethtool --offload "$DEV" "$TOE_OPTION" off #&>/dev/null || true
+  done
+done
 
 # Redirect ingress traffic from WAN to IFB and restore DSCP from conntrack
 tc filter add dev "$WAN" parent ffff: protocol all matchall action ctinfo dscp 63 128 mirred egress redirect dev "ifb-$WAN"
@@ -1326,7 +1335,11 @@ setup_game_qdisc() {
     # for fq_codel
     local INTVL=$((100+2*1500*8/RATE))
     local TARG=$((540*8/RATE+4))
-
+    local EXTRAARG=" ecn no_dq_rate_estimator"
+    if [ "$RATE" -lt 3000 ]; then
+        local EXTRAARG=" noecn bytemode no_dq_rate_estimator"
+        local MTU=$((744))
+    fi
     # Delete previous qdisc on this handle if it exists (optional, but good practice)
     tc qdisc del dev "$DEV" parent 1:11 handle 10: > /dev/null 2>&1
 
@@ -1363,6 +1376,10 @@ setup_game_qdisc() {
         "fq_codel")
         tc qdisc add dev "$DEV" parent "1:11" handle 10: fq_codel memory_limit $((RATE*200/8)) interval "${INTVL}ms" target "${TARG}ms" quantum $((MTU * 2))
         ;;
+        "fq_pie")
+            PIE_TARG=$((3*TARG))
+            tc qdisc add dev "$DEV" parent "1:11" fq_pie target "${PIE_TARG}ms" tupdate "${PIE_TARG}ms" $EXTRAARG quantum $((MTU * 2))
+         ;;
         "netem")
             # Only apply NETEM if this direction is enabled
             if [ "$NETEM_DIRECTION" = "both" ] || \
@@ -1450,11 +1467,19 @@ setup_hfsc() {
     # Attach non-game qdiscs
     local INTVL=$((100+2*1500*8/RATE))
     local TARG=$((540*8/RATE+4))
+    local EXTRAARG=" ecn no_dq_rate_estimator"
+    if [ "$RATE" -lt 3000 ]; then
+        local EXTRAARG=" noecn bytemode no_dq_rate_estimator"
+        local MTU=$((744))
+    fi
     for i in 12 13 14 15; do 
         if [ "$nongameqdisc" = "cake" ]; then
             tc qdisc add dev "$DEV" parent "1:$i" cake $nongameqdiscoptions
         elif [ "$nongameqdisc" = "fq_codel" ]; then
             tc qdisc add dev "$DEV" parent "1:$i" fq_codel memory_limit $((RATE*200/8)) interval "${INTVL}ms" target "${TARG}ms" quantum $((MTU * 2))
+        elif [ "$nongameqdisc" = "fq_pie" ]; then
+            PIE_TARG=$((3*TARG))
+            tc qdisc add dev "$DEV" parent "1:$i" fq_pie target "${PIE_TARG}ms" tupdate "${PIE_TARG}ms" $EXTRAARG quantum $((MTU * 2))
         else
             print_msg -err "Unsupported qdisc for non-game traffic: $nongameqdisc"
             exit 1
