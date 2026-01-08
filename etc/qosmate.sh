@@ -1340,6 +1340,9 @@ setup_game_qdisc() {
         local EXTRAARG=" noecn bytemode no_dq_rate_estimator"
         local MTU=$((744))
     fi
+    #echo "Rate: $GAMERATE $RATE $MTU"
+    local DEFMTU=$(( (MTU * GAMERATE) / RATE))
+    #echo "Rate: $GAMERATE $RATE $MTU $DEFMTU"
     # Delete previous qdisc on this handle if it exists (optional, but good practice)
     tc qdisc del dev "$DEV" parent 1:11 handle 10: > /dev/null 2>&1
 
@@ -1374,11 +1377,11 @@ setup_game_qdisc() {
             ## send game packets to 10:, they're all treated the same
         ;;
         "fq_codel")
-        tc qdisc add dev "$DEV" parent "1:11" handle 10: fq_codel memory_limit $((RATE*200/8)) interval "${INTVL}ms" target "${TARG}ms" quantum $((MTU * 2))
+            tc qdisc add dev "$DEV" parent "1:11" handle 10: fq_codel memory_limit $((RATE*200/8)) interval "${INTVL}ms" target "${TARG}ms" quantum $DEFMTU
         ;;
         "fq_pie")
             PIE_TARG=$((3*TARG))
-            tc qdisc add dev "$DEV" parent "1:11" fq_pie target "${PIE_TARG}ms" tupdate "${PIE_TARG}ms" $EXTRAARG quantum $((MTU * 2))
+            tc qdisc add dev "$DEV" parent "1:11" fq_pie target "${PIE_TARG}ms" tupdate "${PIE_TARG}ms" $EXTRAARG quantum $DEFMTU
          ;;
         "netem")
             # Only apply NETEM if this direction is enabled
@@ -1472,14 +1475,16 @@ setup_hfsc() {
         local EXTRAARG=" noecn bytemode no_dq_rate_estimator"
         local MTU=$((744))
     fi
-    for i in 12 13 14 15; do 
+    for i in 12 13 14 15; do
+        local index=$((10 * (16 - i) ))
+        local DEFMTU=$(( MTU * index / 100 ))
         if [ "$nongameqdisc" = "cake" ]; then
             tc qdisc add dev "$DEV" parent "1:$i" cake $nongameqdiscoptions
         elif [ "$nongameqdisc" = "fq_codel" ]; then
-            tc qdisc add dev "$DEV" parent "1:$i" fq_codel memory_limit $((RATE*200/8)) interval "${INTVL}ms" target "${TARG}ms" quantum $((MTU * 2))
+            tc qdisc add dev "$DEV" parent "1:$i" fq_codel memory_limit $((RATE*200/8)) interval "${INTVL}ms" target "${TARG}ms" quantum $DEFMTU
         elif [ "$nongameqdisc" = "fq_pie" ]; then
             PIE_TARG=$((3*TARG))
-            tc qdisc add dev "$DEV" parent "1:$i" fq_pie target "${PIE_TARG}ms" tupdate "${PIE_TARG}ms" $EXTRAARG quantum $((MTU * 2))
+            tc qdisc add dev "$DEV" parent "1:$i" fq_pie target "${PIE_TARG}ms" tupdate "${PIE_TARG}ms" $EXTRAARG quantum $DEFMTU
         else
             print_msg -err "Unsupported qdisc for non-game traffic: $nongameqdisc"
             exit 1
@@ -1891,7 +1896,7 @@ setup_htb() {
 # Validate gameqdisc choice (used by HFSC and Hybrid)
 if [ "$ROOT_QDISC" = "hfsc" ] || [ "$ROOT_QDISC" = "hybrid" ]; then
     case "$gameqdisc" in
-        drr|qfq|pfifo|bfifo|red|fq_codel|netem) ;; # Supported qdiscs
+        drr|qfq|pfifo|bfifo|red|fq_codel|netem|fq_pie) ;; # Supported qdiscs
         *)
             print_msg -warn "Unsupported gameqdisc '$gameqdisc' selected in config. Reverting to 'pfifo'."
             gameqdisc="pfifo" # Revert to a simple default as fallback
